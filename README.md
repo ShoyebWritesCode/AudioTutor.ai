@@ -79,12 +79,3 @@ app/
 static/
   index.html               Minimal browser test client
 ```
-
-## Production notes (next steps)
-
-- Swap the browser `ScriptProcessorNode` for an `AudioWorklet`, and stream TTS
-  playback via MediaSource for true low-latency output.
-- Consider **WebRTC** if you need phone-call-grade latency + echo cancellation.
-- Add auth + a real `user_id` per child (currently hard-coded `demo`).
-- For self-hosted/offline TTS, drop in **Piper** or **Kokoro** behind `tts.py`.
-- Watch Groq/Cerebras free-tier rate limits; add retry/backoff for 429s.
