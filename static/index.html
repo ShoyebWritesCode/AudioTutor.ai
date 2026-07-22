@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kids English Voice Tutor — test client</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+    button { font-size: 18px; padding: 10px 20px; border-radius: 8px; cursor: pointer; }
+    #log { margin-top: 20px; }
+    .user { color: #1565c0; }
+    .tutor { color: #2e7d32; }
+    .meta { color: #888; font-size: 13px; }
+    #status { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>🎤 Voice Tutor (test client)</h1>
+  <p>Frontend is intentionally minimal — this only exists to exercise the backend.</p>
+  <button id="toggle">Start talking</button>
+  <p>Status: <span id="status">idle</span></p>
+  <div id="log"></div>
+
+  <script>
+    const SAMPLE_RATE = 16000;
+    let ws, audioCtx, processor, source, stream;
+    let speaking = false;
+
+    // ── Streaming TTS playback via MediaSource ────────────────────────────────
+    // Each MP3 chunk is fed into a SourceBuffer the moment it arrives over the
+    // WebSocket. The browser starts decoding and playing within ~100 ms of the
+    // first chunk — instead of waiting for the entire response to buffer first.
+    let mediaSource = null;
+    let sourceBuffer = null;
+    let audioEl = null;
+    let chunkQueue = [];   // chunks waiting while SourceBuffer is busy updating
+    let msOpen = false;
+
+    const $status = document.getElementById('status');
+    const $log    = document.getElementById('log');
+    const $toggle = document.getElementById('toggle');
+
+    function log(text, cls) {
+      const p = document.createElement('p');
+      p.className = cls || '';
+      p.textContent = text;
+      $log.appendChild(p);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    $toggle.onclick = async () => {
+      if (speaking) { stopAll(); return; }
+      await start();
+    };
+
+    // ── TTS streaming helpers ─────────────────────────────────────────────────
+    function initMediaSource() {
+      teardownMediaSource();
+      mediaSource = new MediaSource();
+      audioEl = new Audio();
+      audioEl.src = URL.createObjectURL(mediaSource);
+      msOpen = false;
+      chunkQueue = [];
+
+      mediaSource.addEventListener('sourceopen', () => {
+        msOpen = true;
+        // MP3 is universally supported; edge-tts outputs MP3 by default.
+        sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+        sourceBuffer.addEventListener('updateend', flushQueue);
+        flushQueue();
+      });
+
+      audioEl.play().catch(() => {});
+    }
+
+    function flushQueue() {
+      if (!msOpen || !sourceBuffer || sourceBuffer.updating || chunkQueue.length === 0) return;
+      const chunk = chunkQueue.shift();
+      sourceBuffer.appendBuffer(chunk);
+    }
+
+    function feedChunk(uint8) {
+      if (!mediaSource || !msOpen) return;
+      chunkQueue.push(uint8);
+      flushQueue();
+    }
+
+    function teardownMediaSource() {
+      if (audioEl) { audioEl.pause(); audioEl.src = ''; audioEl = null; }
+      if (mediaSource && mediaSource.readyState === 'open') {
+        try { mediaSource.endOfStream(); } catch (_) {}
+      }
+      mediaSource = null;
+      sourceBuffer = null;
+      chunkQueue = [];
+      msOpen = false;
+    }
+
+    function endMediaSource() {
+      // Signal no more data so the browser knows it can finish decoding.
+      if (mediaSource && mediaSource.readyState === 'open') {
+        const tryEnd = () => {
+          if (sourceBuffer && sourceBuffer.updating) {
+            sourceBuffer.addEventListener('updateend', tryEnd, { once: true });
+          } else {
+            try { mediaSource.endOfStream(); } catch (_) {}
+          }
+        };
+        tryEnd();
+      }
+    }
+
+    // ── WebSocket + mic setup ─────────────────────────────────────────────────
+    async function start() {
+      $log.innerHTML = ''; // Clear old transcript log
+      ws = new WebSocket(`ws://${location.host}/ws?user_id=demo`);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          handleControl(JSON.parse(ev.data));
+        } else {
+          // Binary frame = MP3 audio chunk → feed immediately into MediaSource.
+          feedChunk(new Uint8Array(ev.data));
+        }
+      };
+      ws.onclose = () => { $status.textContent = 'disconnected'; };
+
+      stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        channelCount: 1, echoCancellation: true, noiseSuppression: true
+      }});
+      audioCtx  = new AudioContext({ sampleRate: SAMPLE_RATE });
+      source    = audioCtx.createMediaStreamSource(stream);
+      processor = audioCtx.createScriptProcessor(2048, 1, 1);
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const f32 = e.inputBuffer.getChannelData(0);
+        const i16 = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) {
+          const s = Math.max(-1, Math.min(1, f32[i]));
+          i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        ws.send(i16.buffer);
+      };
+
+      speaking = true;
+      $toggle.textContent = 'Stop';
+      $status.textContent = 'listening';
+    }
+
+    function handleControl(msg) {
+      switch (msg.type) {
+        case 'vad':
+          $status.textContent = msg.speech ? 'hearing you…' : 'thinking…';
+          break;
+        case 'transcript':
+          log((msg.role === 'user' ? 'Child: ' : 'Tutor: ') + msg.text,
+              msg.role === 'user' ? 'user' : 'tutor');
+          break;
+        case 'tts_start':
+          // Open a fresh MediaSource — audio plays as the first chunk arrives.
+          initMediaSource();
+          break;
+        case 'tts_end':
+          endMediaSource();
+          $status.textContent = 'listening';
+          break;
+        case 'interrupt':
+          // Stop playback immediately on barge-in.
+          teardownMediaSource();
+          log('(interrupted)', 'meta');
+          break;
+        case 'error':
+          log('Error: ' + msg.message, 'meta');
+          break;
+      }
+    }
+
+    function stopAll() {
+      speaking = false;
+      $toggle.textContent = 'Start talking';
+      $status.textContent = 'idle';
+      teardownMediaSource();
+      if (processor) processor.disconnect();
+      if (source)    source.disconnect();
+      if (audioCtx)  audioCtx.close();
+      if (stream)    stream.getTracks().forEach(t => t.stop());
+      if (ws)        ws.close();
+    }
+  </script>
+</body>
+</html>

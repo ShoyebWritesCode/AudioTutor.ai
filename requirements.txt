@@ -1,0 +1,21 @@
+# --- Web / transport ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# --- LLM + STT (Groq / Cerebras are OpenAI-compatible) ---
+openai>=1.50
+
+# --- Voice Activity Detection (local, latency-critical) ---
+silero-vad>=5.1
+onnxruntime>=1.18
+torch>=2.2          # required by silero-vad VADIterator (CPU build is fine)
+numpy>=1.26
+
+# --- Text to Speech (free, no API key) ---
+edge-tts>=6.1
+
+# --- RAG / long-term memory (local embeddings, free) ---
+chromadb>=0.5
+
+# --- Config ---
+pydantic-settings>=2.4
